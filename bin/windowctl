@@ -1,0 +1,237 @@
+#!/bin/sh
+
+drop_first() {
+    read -r _
+    cat
+}
+
+drop_while() {
+    while read -r a
+    do
+        if ! echo $a | "$@"
+        then
+            echo $a
+
+            break
+        fi
+    done
+
+    cat
+}
+
+first() {
+    read -r a && echo $a
+}
+
+route() {
+    cat << A
+if grep -q "^$@$" << B
+\$@
+B
+then
+    set -- \$(
+        sed "s|^$@$|\1|" 2>/dev/null << B
+\$@
+B
+    )
+
+    $(cat)
+
+    exit
+fi
+A
+}
+
+eval "$({
+    route << 'A'
+        windowctl get usage 1>&2
+        exit 1
+A
+    route get current_desktop << 'A'
+        wmctrl -d |
+        grep -E "\*" |
+        cut -f 1 -d " "
+A
+    route get current_window << 'A'
+        xdotool getactivewindow
+A
+    route get desktops << 'A'
+        wmctrl -l |
+        awk "{print \$2}" |
+        uniq
+A
+    route get desktops/"\(.*\)"/is_focused << 'A'
+        if [ $1 -eq $(windowctl get current_desktop) ]
+        then
+            echo true
+        else
+            echo false
+        fi
+A
+    route get desktops/"\(.*\)"/next << 'A'
+        {
+            windowctl get desktops
+            echo $1
+        } |
+        sort |
+        uniq |
+        drop_while xargs -I@ [ @ -ne $1 ] |
+        drop_first |
+        first
+A
+    route get desktops/"\(.*\)"/previous << 'A'
+        {
+            windowctl get desktops
+            echo $1
+        } |
+        sort -r |
+        uniq |
+        drop_while xargs -I@ [ @ -ne $1 ] |
+        drop_first |
+        first
+A
+    route get desktops/"\(.*\)"/windows << 'A'
+        wmctrl -l |
+        grep " $1 " |
+        cut -f 1 -d " " |
+        xargs -L 1 printf "%d\n"
+A
+    route get desktops/"\(.*\)" << 'A'
+        cat << B
+$(windowctl get desktops/$1/next)
+$(windowctl get desktops/$1/previous)
+B
+A
+    route get usage << 'A'
+        cat << 'B'
+Usage: windowctl SP method SP [ "/" ] index
+
+method = "get" / "insert" / "set" / "unset" / "fullscreen" / "normalize"
+
+index = "current_desktop"
+      / "current_window"
+      / "desktops" [ "/" index [ "/" desktop-attribute ] ]
+      / "usage"
+      / "windows" [ "/" index [ "/" windows-attribute ] ]
+
+desktop-attribute = "windows"
+
+window-attribute = "desktop"
+                 / "is_focused"
+                 / "name"
+
+window-query = *(
+    "query=" window-attribute ":" value
+)
+
+example: windowctl get desktops
+         windowctl insert desktops/0/windows <<< $(windowctl get current_window)
+B
+A
+    route get windows << 'A'
+        wmctrl -l |
+        cut -f 1 -d " " |
+        xargs -L 1 printf "%d\n"
+A
+    route get windows/"\(.*\)"/desktop << 'A'
+        wmctrl -l |
+        grep -E "^0x0*"$(printf "%x" $1) |
+        awk "{print \$2}"
+A
+    route get windows/"\(.*\)"/is_focused << 'A'
+        if [ $1 -eq $(windowctl get current_window) ]
+        then
+            echo true
+        else
+            echo false
+        fi
+A
+    route get windows/"\(.*\)"/name << 'A'
+        xdotool getwindowname $1
+A
+    route get windows/"\(.*\)" << 'A'
+        cat << B
+$(windowctl get windows/$1/desktop)
+$(windowctl get windows/$1/name)
+B
+A
+    route insert desktops/"\(.*\)"/windows << 'A'
+        wmctrl -ir $(cat) -t $1
+A
+    route set desktops/"\(.*\)"/is_focused << 'A'
+        wmctrl -s $1
+A
+    route set windows/"\(.*\)"/is_focused << 'A'
+        wmctrl -ia $1
+A
+    route fullscreen << 'A'
+        windowctl normalize
+
+        window=$(windowctl get current_window)
+
+        desktop=$(windowctl get windows/$window/desktop)
+
+        windowctl get desktops |
+        sort -r |
+        while read -r a && [ $a -ne $desktop ]
+        do
+            windowctl get desktops/$a/windows |
+            xargs -L 1 printf $(($a + 1))"\n%s\n"
+        done |
+        while read -r a && read -r b
+        do
+            windowctl insert desktops/$a/windows << B &
+$b
+B
+        done
+
+        windowctl set desktops/$(($desktop + 1))/is_focused << B &
+true
+B
+        pids=$!
+
+        windowctl insert desktops/$(($desktop + 1))/windows << B &
+$window
+B
+        pids=$pids" "$!
+
+        wait $pids
+
+        windowctl set windows/$window/is_focused << B
+true
+B
+A
+    route normalize << 'A'
+        window=$(windowctl get current_window)
+
+        i=0
+
+        windowctl get desktops |
+        while read -r a
+        do
+            if [ $a -ne $i ]
+            then
+                windowctl get desktops/$a/windows |
+                while read -r b
+                do
+                    windowctl insert desktops/$i/windows << B
+$b
+B
+                done
+            fi
+
+            i=$(($i + 1))
+        done
+
+        windowctl set windows/$window/is_focused << B
+true
+B
+A
+    route unset windows/"\(.*\)" << 'A'
+        wmctrl -ic $1
+A
+    route ".*" << 'A'
+        echo "Not implemented." 1>&2
+        false
+A
+})"
